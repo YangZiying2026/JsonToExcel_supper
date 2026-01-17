@@ -1,0 +1,5 @@
+{
+  "name": "ScoreMaster Agent",
+  "description": "A powerful, pure frontend agent for dynamic student score analysis and Excel report generation.",
+  "requestFramePermissions": []
+}
