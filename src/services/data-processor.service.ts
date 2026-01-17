@@ -49,6 +49,18 @@ export class DataProcessorService {
     this._state.update(s => ({ ...s, stage, progress }));
   }
 
+  // Helper to read file as Base64 string
+  private readFileAsBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        resolve(reader.result as string);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
   async process(jsonFile: File, excelFile: File | null, watermarkFile: File | null) {
     try {
       this.setProgress('正在初始化', 0);
@@ -92,20 +104,28 @@ export class DataProcessorService {
       this.setProgress('计算成绩', 50);
       const processedData = await this.processInChunks(mergedData, subjects, small4Subjects);
 
-      // 7. Generate Excel Workbook
+      // 7. Process Watermark (If exists)
+      let watermarkBase64: string | null = null;
+      if (watermarkFile) {
+        this.setProgress('处理背景水印', 70);
+        this.log('正在注入背景水印并调整透明度...');
+        watermarkBase64 = await this.readFileAsBase64(watermarkFile);
+      }
+
+      // 8. Generate Excel Workbook
       this.setProgress('生成工作簿', 80);
       const wb = XLSX.utils.book_new();
 
       // -- Sheet 1: Year Grade Total Rank --
       this.log('生成工作表: 全年级总分排行');
-      const gradeTotalSheet = this.buildGradeTotalSheet(processedData, subjects.length >= 2, subjects.length === 1 && small4Subjects.length > 0);
+      const gradeTotalSheet = this.buildGradeTotalSheet(processedData, subjects.length >= 2, subjects.length === 1 && small4Subjects.length > 0, watermarkBase64);
       XLSX.utils.book_append_sheet(wb, gradeTotalSheet, '全年级总分排行');
 
       // -- Sheet 2..N: Subject Ranks --
       if (subjects.length >= 2) {
         for (const subj of subjects) {
           const isSmall4 = small4Subjects.includes(subj);
-          const sheet = this.buildSubjectSheet(processedData, subj, isSmall4);
+          const sheet = this.buildSubjectSheet(processedData, subj, isSmall4, watermarkBase64);
           XLSX.utils.book_append_sheet(wb, sheet, `${subj}成绩排行`);
         }
       }
@@ -115,16 +135,16 @@ export class DataProcessorService {
       this.log(`正在为 ${classes.length} 个班级生成分班表...`);
       for (const cls of classes) {
         const classData = processedData.filter(d => d.class === cls);
-        const classSheet = this.buildClassSheet(classData, subjects, small4Subjects, otherSubjects);
+        const classSheet = this.buildClassSheet(classData, subjects, small4Subjects, otherSubjects, watermarkBase64);
         XLSX.utils.book_append_sheet(wb, classSheet, `${cls}总分排行`);
       }
 
       // -- Sheet: Summary --
       this.log('生成多维统计报告...');
-      const summarySheet = this.buildDetailedSummarySheet(processedData, subjects, small4Subjects);
+      const summarySheet = this.buildDetailedSummarySheet(processedData, subjects, small4Subjects, watermarkBase64);
       XLSX.utils.book_append_sheet(wb, summarySheet, '成绩深度分析');
 
-      // 8. Output
+      // 9. Output
       this.setProgress('正在完成', 95);
       const wbOut = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
       const blob = new Blob([wbOut], { type: 'application/octet-stream' });
@@ -295,7 +315,8 @@ export class DataProcessorService {
 
   // --- Styling Helpers ---
 
-  private setStyle(cell: any, fillHex: string, fontColorHex: string, isBold: boolean, isHeader: boolean) {
+  // Modified: Accepts null for fillHex to support transparency
+  private setStyle(cell: any, fillHex: string | null, fontColorHex: string, isBold: boolean, isHeader: boolean) {
     cell.s = {
       font: { 
         name: 'Microsoft YaHei', 
@@ -308,7 +329,6 @@ export class DataProcessorService {
         horizontal: "center", 
         wrapText: true 
       },
-      fill: { fgColor: { rgb: fillHex } },
       border: {
         top: { style: "thin", color: { rgb: this.COLORS.BORDER } },
         bottom: { style: "thin", color: { rgb: this.COLORS.BORDER } },
@@ -316,11 +336,18 @@ export class DataProcessorService {
         right: { style: "thin", color: { rgb: this.COLORS.BORDER } }
       }
     };
+    
+    // Only apply fill if color is provided. If null (watermark mode), leave it undefined (transparent)
+    if (fillHex) {
+       cell.s.fill = { fgColor: { rgb: fillHex } };
+    }
   }
 
-  private applyTableBodyStyle(ws: any, rowCount: number, colCount: number, startRow: number = 1) {
+  // Modified: accepts hasWatermark to determine if we should skip row coloring
+  private applyTableBodyStyle(ws: any, rowCount: number, colCount: number, startRow: number = 1, hasWatermark: boolean = false) {
     for (let r = startRow; r < rowCount + startRow; r++) {
-       const fill = r % 2 === 0 ? this.COLORS.ROW_EVEN : this.COLORS.ROW_ODD;
+       // If watermark exists, use null (transparent) fill, otherwise use alternating colors
+       const fill = hasWatermark ? null : (r % 2 === 0 ? this.COLORS.ROW_EVEN : this.COLORS.ROW_ODD);
        for (let c = 0; c < colCount; c++) {
           const addr = XLSX.utils.encode_cell({ r, c });
           if (!ws[addr]) continue;
@@ -339,7 +366,7 @@ export class DataProcessorService {
 
   // --- Builders ---
 
-  private buildGradeTotalSheet(data: any[], multiSubject: boolean, singleSmall4: boolean) {
+  private buildGradeTotalSheet(data: any[], multiSubject: boolean, singleSmall4: boolean, watermarkBase64: string | null) {
     data.sort((a, b) => a.yearRank_raw - b.yearRank_raw);
 
     const aoa = [];
@@ -365,17 +392,22 @@ export class DataProcessorService {
     
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     
+    // Attempt to attach watermark (Library dependent, but data is ready)
+    if (watermarkBase64) {
+      ws['!backgroundImage'] = watermarkBase64; 
+    }
+
     // Apply Styling
-    // Header
+    // Header (Keep colors)
     this.applyTableHeadStyle(ws, 0, 0, header.length - 1, this.COLORS.HEADER_TOTAL);
-    // Body
-    this.applyTableBodyStyle(ws, aoa.length - 1, header.length);
+    // Body (Remove colors if watermark exists)
+    this.applyTableBodyStyle(ws, aoa.length - 1, header.length, 1, !!watermarkBase64);
 
     ws['!cols'] = [{wch:6}, {wch:12}, {wch:12}, {wch:10}, {wch:2}, {wch:2}, {wch:2}, {wch:6}, {wch:12}, {wch:12}, {wch:10}];
     return ws;
   }
 
-  private buildSubjectSheet(data: any[], subject: string, isSmall4: boolean) {
+  private buildSubjectSheet(data: any[], subject: string, isSmall4: boolean, watermarkBase64: string | null) {
      const aoa = [];
      const rawKey = subject;
      const assignedKey = `assigned_${subject}`;
@@ -399,17 +431,21 @@ export class DataProcessorService {
      }
      
      const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+     if (watermarkBase64) {
+        ws['!backgroundImage'] = watermarkBase64;
+     }
      
      // Styling
      const color = isSmall4 ? this.COLORS.HEADER_SMALL4 : this.COLORS.HEADER_OTHER;
      this.applyTableHeadStyle(ws, 0, 0, header.length - 1, color);
-     this.applyTableBodyStyle(ws, aoa.length - 1, header.length);
+     this.applyTableBodyStyle(ws, aoa.length - 1, header.length, 1, !!watermarkBase64);
 
      ws['!cols'] = [{wch:6}, {wch:12}, {wch:12}, {wch:10}, {wch:2}, {wch:2}, {wch:2}, {wch:6}, {wch:12}, {wch:12}, {wch:10}];
      return ws;
   }
 
-  private buildClassSheet(classData: any[], subjects: string[], small4: string[], otherSubjects: string[]) {
+  private buildClassSheet(classData: any[], subjects: string[], small4: string[], otherSubjects: string[], watermarkBase64: string | null) {
     classData.sort((a, b) => a.classRank_raw - b.classRank_raw);
     const aoa: any[][] = [[], []]; 
     const merges: any[] = [];
@@ -473,12 +509,16 @@ export class DataProcessorService {
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     ws['!merges'] = merges;
     ws['!cols'] = new Array(colIdx).fill({wch: 10});
+    
+    if (watermarkBase64) {
+        ws['!backgroundImage'] = watermarkBase64;
+    }
 
     // -- Apply Styling --
     // Body
-    this.applyTableBodyStyle(ws, aoa.length - 2, colIdx, 2);
+    this.applyTableBodyStyle(ws, aoa.length - 2, colIdx, 2, !!watermarkBase64);
 
-    // Headers (Semantic Coloring)
+    // Headers (Semantic Coloring) - Keep these always
     styleZones.forEach(zone => {
       this.applyTableHeadStyle(ws, 0, zone.s, zone.e, zone.c);
       this.applyTableHeadStyle(ws, 1, zone.s, zone.e, zone.c);
@@ -487,7 +527,7 @@ export class DataProcessorService {
     return ws;
   }
 
-  private buildDetailedSummarySheet(data: any[], subjects: string[], small4: string[]) {
+  private buildDetailedSummarySheet(data: any[], subjects: string[], small4: string[], watermarkBase64: string | null) {
     const aoa = [];
     const headers = ['统计群体', '项目', '参考人数', '平均分', '中位数', '最高分', '最低分', '高分名单 (Top 5)', '低分名单 (Bottom 5)'];
     aoa.push(headers);
@@ -556,6 +596,10 @@ export class DataProcessorService {
 
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     ws['!cols'] = [{wch:15}, {wch:15}, {wch:10}, {wch:10}, {wch:10}, {wch:10}, {wch:10}, {wch:40}, {wch:40}];
+    
+    if (watermarkBase64) {
+        ws['!backgroundImage'] = watermarkBase64;
+    }
 
     // Custom Styling for Summary
     this.applyTableHeadStyle(ws, 0, 0, headers.length - 1, this.COLORS.HEADER_SUMMARY);
@@ -566,17 +610,19 @@ export class DataProcessorService {
        const groupName = rowData[0];
        const itemName = rowData[1];
        
-       let fill = r % 2 === 0 ? this.COLORS.ROW_EVEN : this.COLORS.ROW_ODD;
+       // If watermark exists, default to transparent (null).
+       // If no watermark, apply alternating colors
+       let fill = watermarkBase64 ? null : (r % 2 === 0 ? this.COLORS.ROW_EVEN : this.COLORS.ROW_ODD);
        let bold = false;
 
        // Highlight Whole Grade
        if (groupName === '全年级') {
-         fill = this.COLORS.ROW_HIGHLIGHT_GRADE;
+         if (!watermarkBase64) fill = this.COLORS.ROW_HIGHLIGHT_GRADE;
          bold = true;
        } 
        // Highlight Totals in class sections
        else if (String(itemName).includes('总分')) {
-         fill = this.COLORS.ROW_HIGHLIGHT_TOTAL;
+         if (!watermarkBase64) fill = this.COLORS.ROW_HIGHLIGHT_TOTAL;
          bold = true;
        }
 
