@@ -1,7 +1,3 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
-
 # 成绩分析器
 
 专业的成绩数据分析工具，支持将复杂的原始成绩 JSON 数据一键重构成多维排行、自动分班统计的精美 Excel 报表。
