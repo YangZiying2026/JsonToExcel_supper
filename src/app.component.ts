@@ -22,6 +22,7 @@ export class AppComponent {
   jsonFile = signal<File | null>(null);
   excelFile = signal<File | null>(null);
   watermarkFile = signal<File | null>(null);
+  outputFilename = signal<string>('');
   downloadUrl = signal<SafeUrl | null>(null);
 
   // Helper to visualize progress step
@@ -54,6 +55,17 @@ export class AppComponent {
     }
   }
 
+  onFilenameInput(event: Event) {
+    const input = event.target as HTMLInputElement;
+    this.outputFilename.set(input.value.trim());
+  }
+
+  get finalFilename(): string {
+    const name = this.outputFilename();
+    if (!name) return 'ScoreMaster_Report.xlsx';
+    return name.endsWith('.xlsx') ? name : `${name}.xlsx`;
+  }
+
   async startProcessing() {
     if (!this.jsonFile()) return;
     try {
@@ -77,6 +89,7 @@ export class AppComponent {
     this.jsonFile.set(null);
     this.excelFile.set(null);
     this.watermarkFile.set(null);
+    this.outputFilename.set('');
     this.downloadUrl.set(null);
 
     // Note: We do NOT need to manually clear the input values here.

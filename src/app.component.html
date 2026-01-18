@@ -10,9 +10,8 @@
 
   <!-- Brand Logo (Top Right) -->
   <div class="absolute top-6 right-6 sm:top-8 sm:right-8 z-50 animate-fade-in-up">
-    
     <img 
-      src="src/services/logo.png" 
+      src="assets/logo.png" 
       alt="KingDove" 
       class="h-10 sm:h-14 w-auto object-contain drop-shadow-sm opacity-90 hover:opacity-100 hover:scale-105 transition-all duration-300 cursor-pointer"
     >
@@ -109,6 +108,25 @@
             </div>
 
           </div>
+
+          <!-- Filename Input -->
+          <div class="mt-6">
+            <div class="p-5 rounded-[2rem] border bg-white border-slate-100 hover:border-indigo-200 transition-all duration-300 flex items-center space-x-4 focus-within:ring-2 focus-within:ring-indigo-100 focus-within:border-indigo-300 shadow-sm hover:shadow-md">
+               <div class="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+               </div>
+               <div class="flex-1">
+                 <label class="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">自定义输出文件名 (可选)</label>
+                 <input 
+                   type="text" 
+                   [value]="outputFilename()"
+                   (input)="onFilenameInput($event)"
+                   placeholder="默认为: ScoreMaster_Report.xlsx" 
+                   class="w-full bg-transparent border-none p-0 text-slate-800 font-bold placeholder:text-slate-300 focus:ring-0 text-sm sm:text-base outline-none"
+                 >
+               </div>
+            </div>
+          </div>
         </div>
 
         <!-- Action Button -->
@@ -180,14 +198,14 @@
           <span class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">文件摘要</span>
           <div class="text-sm text-slate-800 font-bold bg-white px-6 py-3 rounded-xl border border-slate-100 shadow-sm flex items-center">
              <svg class="w-5 h-5 mr-3 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-             ScoreMaster_Report.xlsx
+             {{ finalFilename }}
           </div>
         </div>
 
         <div class="flex flex-col sm:flex-row justify-center gap-4">
           <a 
             [href]="downloadUrl()" 
-            download="ScoreMaster_Report.xlsx"
+            [download]="finalFilename"
             class="px-10 py-4 bg-emerald-600 text-white rounded-xl font-bold shadow-xl shadow-emerald-200 hover:bg-emerald-700 hover:-translate-y-1 transition-all active:scale-95 flex items-center justify-center cursor-pointer"
           >
             <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
