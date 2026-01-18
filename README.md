@@ -2,19 +2,73 @@
 <img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
 </div>
 
-# Run and deploy your AI Studio app
+# 成绩分析器
 
-This contains everything you need to run your app locally.
+专业的成绩数据分析工具，支持将复杂的原始成绩 JSON 数据一键重构成多维排行、自动分班统计的精美 Excel 报表。
 
-View your app in AI Studio: https://ai.studio/apps/drive/1lhmXr87lhPB166LdS0btR2UV804NF7ay
+## 功能特性
 
-## Run Locally
+- 🚀 **智能字段识别**：自动推断考号/学号字段，识别姓名、班级、年级等语义信息
+- 📊 **多维度分析**：支持全年级、分班级统计，计算平均分、最高分、最低分
+- 🔗 **知识库匹配**：可选关联 Excel 知识库，自动补充学生信息
+- 🎨 **自定义水印**：支持添加品牌背景水印
+- 💾 **本地执行**：所有数据处理在本地完成，数据安全可控
 
-**Prerequisites:**  Node.js
+## 技术栈
 
+- React 19.2.3
+- TypeScript 5.8.2
+- Vite 6.2.0
+- SheetJS (Excel 处理)
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## 本地运行
+
+**前置要求：** Node.js
+
+1. 安装依赖：
+   ```bash
+   npm install
+   ```
+
+2. 启动开发服务器：
+   ```bash
+   npm run dev
+   ```
+
+3. 构建生产版本：
+   ```bash
+   npm run build
+   ```
+
+## 使用说明
+
+1. 上传 JSON 格式的成绩单文件（必传）
+2. 可选：上传包含学生信息的 Excel 知识库（用于补充姓名、班级等）
+3. 可选：上传自定义水印图片
+4. 点击"立即生成多维分析报表"按钮
+5. 等待处理完成后自动下载 Excel 报表
+
+## 数据格式要求
+
+**JSON 成绩单格式示例：**
+```json
+[
+  {
+    "考号": "2024001",
+    "姓名": "张三",
+    "班级": "高一(1)班",
+    "年级": "高一",
+    "语文": 95,
+    "数学": 88,
+    "英语": 92
+  }
+]
+```
+
+**Excel 知识库格式：**
+- 第一列为考号/学号
+- 可选包含：姓名、班级、年级等字段
+
+## License
+
+MIT
