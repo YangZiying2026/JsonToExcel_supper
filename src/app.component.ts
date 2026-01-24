@@ -2,7 +2,8 @@
 import { Component, signal, inject, ViewChild, ElementRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { DataProcessorService } from './services/data-processor.service';
-import { SafeUrl, DomSanitizer } from '@angular/platform-browser';
+import { SafeUrl, SafeHtml, DomSanitizer } from '@angular/platform-browser';
+import { marked } from 'marked';
 
 @Component({
   selector: 'app-root',
@@ -24,6 +25,58 @@ export class AppComponent {
   watermarkFile = signal<File | null>(null);
   outputFilename = signal<string>('');
   downloadUrl = signal<SafeUrl | null>(null);
+
+  // Markdown State
+  mdFiles = signal<{title: string, filename: string}[]>([]);
+  currentMdContent = signal<SafeHtml>('');
+  currentMdIndex = signal<number>(0);
+
+  constructor() {
+    this.loadMdList();
+  }
+
+  async loadMdList() {
+    try {
+      // Use absolute path /markdown/... to ensure correct routing
+      const res = await fetch('/markdown/list.json');
+      if (res.ok) {
+        const list = await res.json();
+        this.mdFiles.set(list);
+        if (list.length > 0) {
+          this.selectMd(0);
+        }
+      } else {
+        console.error('Markdown list not found. Status:', res.status);
+        this.currentMdContent.set(this.sanitizer.bypassSecurityTrustHtml(
+          `<div class="text-center p-4 text-slate-500">
+             <p class="font-bold mb-2">无法加载文档配置</p>
+             <p class="text-xs">如果您刚刚添加了此功能，请尝试<span class="text-red-500 font-bold">重启开发服务器</span>以应用静态资源配置。</p>
+           </div>`
+        ));
+      }
+    } catch (e) {
+      console.error('Failed to load markdown list', e);
+    }
+  }
+
+  async selectMd(index: number) {
+    this.currentMdIndex.set(index);
+    const file = this.mdFiles()[index];
+    if (!file) return;
+    try {
+      const res = await fetch(`/markdown/${file.filename}`);
+      if (res.ok) {
+        const text = await res.text();
+        const html = await marked.parse(text);
+        this.currentMdContent.set(this.sanitizer.bypassSecurityTrustHtml(html as string));
+      } else {
+        this.currentMdContent.set(this.sanitizer.bypassSecurityTrustHtml(`<p class="text-red-500">无法加载文档内容 (Error ${res.status})</p>`));
+      }
+    } catch (e) {
+      console.error('Failed to load markdown file', e);
+      this.currentMdContent.set(this.sanitizer.bypassSecurityTrustHtml(`<p class="text-red-500">加载出错</p>`));
+    }
+  }
 
   // Helper to visualize progress step
   getStageIndex(stage: string): number {

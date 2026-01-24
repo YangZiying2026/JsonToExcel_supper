@@ -25,9 +25,14 @@
                 "output": "./"
               },
               {
-                "glob": "logo.png",
-                "input": "src/services",
+                "glob": "**/*",
+                "input": "src/assets",
                 "output": "assets"
+              },
+              {
+                "glob": "**/*",
+                "input": "MarkDown",
+                "output": "markdown"
               }
             ]
           },

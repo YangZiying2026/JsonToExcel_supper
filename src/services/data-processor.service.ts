@@ -1,5 +1,6 @@
 
 import { Injectable, signal } from '@angular/core';
+import ExcelJS from 'exceljs';
 
 declare const XLSX: any;
 
@@ -18,20 +19,20 @@ export class DataProcessorService {
 
   // --- High Contrast Semantic Color Palette (Hex without #) ---
   private readonly COLORS = {
-    HEADER_FIXED: "334155",    // Slate 700 (Dark Grey)
-    HEADER_TOTAL: "1D4ED8",    // Blue 700 (Strong Blue)
-    HEADER_SMALL4: "0F766E",   // Teal 700 (Strong Teal)
-    HEADER_OTHER: "7C3AED",    // Violet 600 (Strong Purple)
-    HEADER_SUMMARY: "0F172A",  // Slate 900 (Black-ish)
+    HEADER_FIXED: "FF334155",    // Slate 700 (Dark Grey)
+    HEADER_TOTAL: "FF1D4ED8",    // Blue 700 (Strong Blue)
+    HEADER_SMALL4: "FF0F766E",   // Teal 700 (Strong Teal)
+    HEADER_OTHER: "FF7C3AED",    // Violet 600 (Strong Purple)
+    HEADER_SUMMARY: "FF0F172A",  // Slate 900 (Black-ish)
     
-    ROW_ODD: "FFFFFF",         // White
-    ROW_EVEN: "F8FAFC",        // Slate 50 (Very light grey)
+    ROW_ODD: "FFFFFFFF",         // White
+    ROW_EVEN: "FFF8FAFC",        // Slate 50 (Very light grey)
     
     // Highlight colors
-    ROW_HIGHLIGHT_GRADE: "DBEAFE", // Blue 100 (Light Blue for Year Grade)
-    ROW_HIGHLIGHT_TOTAL: "F3E8FF", // Purple 100 (Light Purple for Total Score rows)
+    ROW_HIGHLIGHT_GRADE: "FFDBEAFE", // Blue 100 (Light Blue for Year Grade)
+    ROW_HIGHLIGHT_TOTAL: "FFF3E8FF", // Purple 100 (Light Purple for Total Score rows)
     
-    BORDER: "94A3B8"           // Slate 400 (Visible Border)
+    BORDER: "FF94A3B8"           // Slate 400 (Visible Border)
   };
 
   reset() {
@@ -105,28 +106,34 @@ export class DataProcessorService {
       const processedData = await this.processInChunks(mergedData, subjects, small4Subjects);
 
       // 7. Process Watermark (If exists)
-      let watermarkBase64: string | null = null;
+      let watermarkBuffer: ArrayBuffer | null = null;
+      let watermarkExtension: 'png' | 'jpeg' = 'png';
       if (watermarkFile) {
         this.setProgress('处理背景水印', 70);
         this.log('正在注入背景水印并调整透明度...');
-        watermarkBase64 = await this.readFileAsBase64(watermarkFile);
+        watermarkBuffer = await watermarkFile.arrayBuffer();
+        if (watermarkFile.type === 'image/jpeg' || watermarkFile.name.endsWith('.jpg') || watermarkFile.name.endsWith('.jpeg')) {
+          watermarkExtension = 'jpeg';
+        }
       }
 
-      // 8. Generate Excel Workbook
+      // 8. Generate Excel Workbook using ExcelJS
       this.setProgress('生成工作簿', 80);
-      const wb = XLSX.utils.book_new();
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = 'ScoreMaster Agent';
+      workbook.lastModifiedBy = 'ScoreMaster Agent';
+      workbook.created = new Date();
+      workbook.modified = new Date();
 
       // -- Sheet 1: Year Grade Total Rank --
       this.log('生成工作表: 全年级总分排行');
-      const gradeTotalSheet = this.buildGradeTotalSheet(processedData, subjects.length >= 2, subjects.length === 1 && small4Subjects.length > 0, watermarkBase64);
-      XLSX.utils.book_append_sheet(wb, gradeTotalSheet, '全年级总分排行');
+      this.buildGradeTotalSheetExcelJS(workbook, processedData, subjects.length >= 2, subjects.length === 1 && small4Subjects.length > 0, watermarkBuffer, watermarkExtension);
 
       // -- Sheet 2..N: Subject Ranks --
       if (subjects.length >= 2) {
         for (const subj of subjects) {
           const isSmall4 = small4Subjects.includes(subj);
-          const sheet = this.buildSubjectSheet(processedData, subj, isSmall4, watermarkBase64);
-          XLSX.utils.book_append_sheet(wb, sheet, `${subj}成绩排行`);
+          this.buildSubjectSheetExcelJS(workbook, processedData, subj, isSmall4, watermarkBuffer, watermarkExtension);
         }
       }
 
@@ -135,19 +142,17 @@ export class DataProcessorService {
       this.log(`正在为 ${classes.length} 个班级生成分班表...`);
       for (const cls of classes) {
         const classData = processedData.filter(d => d.class === cls);
-        const classSheet = this.buildClassSheet(classData, subjects, small4Subjects, otherSubjects, watermarkBase64);
-        XLSX.utils.book_append_sheet(wb, classSheet, `${cls}总分排行`);
+        this.buildClassSheetExcelJS(workbook, classData, subjects, small4Subjects, otherSubjects, cls, watermarkBuffer, watermarkExtension);
       }
 
       // -- Sheet: Summary --
       this.log('生成多维统计报告...');
-      const summarySheet = this.buildDetailedSummarySheet(processedData, subjects, small4Subjects, watermarkBase64);
-      XLSX.utils.book_append_sheet(wb, summarySheet, '成绩深度分析');
+      this.buildDetailedSummarySheetExcelJS(workbook, processedData, subjects, small4Subjects, watermarkBuffer, watermarkExtension);
 
       // 9. Output
       this.setProgress('正在完成', 95);
-      const wbOut = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-      const blob = new Blob([wbOut], { type: 'application/octet-stream' });
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       const url = URL.createObjectURL(blob);
       
       this.setProgress('完成', 100);
@@ -235,15 +240,17 @@ export class DataProcessorService {
     });
   }
 
-  private async processInChunks(data: any[], subjects: string[], small4: string[]) {
+  private async processInChunks(data: any[], subjects: string[], small4: string[], skipScoring: boolean = false) {
     const result = [...data];
     const CHUNK_SIZE = 5000;
     
     const stats: any = {};
-    small4.forEach(subj => {
-      const values = data.map(d => Number(d[subj]) || 0);
-      stats[subj] = { min: Math.min(...values), max: Math.max(...values) };
-    });
+    if (!skipScoring) {
+      small4.forEach(subj => {
+        const values = data.map(d => Number(d[subj]) || 0);
+        stats[subj] = { min: Math.min(...values), max: Math.max(...values) };
+      });
+    }
 
     for (let i = 0; i < result.length; i += CHUNK_SIZE) {
       if (i > 0) await new Promise(r => setTimeout(r, 0));
@@ -262,17 +269,28 @@ export class DataProcessorService {
         row._rawTotal = rawTotal;
 
         let assignedTotal = rawTotal;
-        const rawSmall4Sum = small4.reduce((acc, s) => acc + (Number(row[s]) || 0), 0);
-        assignedTotal -= rawSmall4Sum;
+        
+        if (!skipScoring) {
+          const rawSmall4Sum = small4.reduce((acc, s) => acc + (Number(row[s]) || 0), 0);
+          assignedTotal -= rawSmall4Sum;
 
-        small4.forEach(subj => {
-          const s = Number(row[subj]) || 0;
-          const { min, max } = stats[subj];
-          let assigned = s;
-          if (max !== min) assigned = Math.round(40 + ((s - min) / (max - min)) * 60);
-          row[`assigned_${subj}`] = assigned;
-          assignedTotal += assigned;
-        });
+          small4.forEach(subj => {
+            const s = Number(row[subj]) || 0;
+            const { min, max } = stats[subj];
+            let assigned = s;
+            if (max !== min) assigned = Math.round(40 + ((s - min) / (max - min)) * 60);
+            row[`assigned_${subj}`] = assigned;
+            assignedTotal += assigned;
+          });
+        } else {
+          // Skip scoring: assigned values = raw values
+          small4.forEach(subj => {
+            const s = Number(row[subj]) || 0;
+            row[`assigned_${subj}`] = s;
+          });
+          // assignedTotal remains equal to rawTotal
+        }
+        
         row._assignedTotal = assignedTotal;
       }
     }
@@ -345,12 +363,18 @@ export class DataProcessorService {
 
   // Modified: accepts hasWatermark to determine if we should skip row coloring
   private applyTableBodyStyle(ws: any, rowCount: number, colCount: number, startRow: number = 1, hasWatermark: boolean = false) {
+    // If watermark exists, we MUST NOT set any fill color (bg) to allow the image to show through.
+    // However, we still want to apply borders and alignment.
+    
     for (let r = startRow; r < rowCount + startRow; r++) {
-       // If watermark exists, use null (transparent) fill, otherwise use alternating colors
+       // If watermark exists, force null (transparent). Otherwise use alternating colors.
        const fill = hasWatermark ? null : (r % 2 === 0 ? this.COLORS.ROW_EVEN : this.COLORS.ROW_ODD);
+       
        for (let c = 0; c < colCount; c++) {
           const addr = XLSX.utils.encode_cell({ r, c });
           if (!ws[addr]) continue;
+          
+          // Apply style with or without fill
           this.setStyle(ws[addr], fill, "000000", false, false);
        }
     }
@@ -364,18 +388,22 @@ export class DataProcessorService {
     }
   }
 
-  // --- Builders ---
+  // --- ExcelJS Builders ---
 
-  private buildGradeTotalSheet(data: any[], multiSubject: boolean, singleSmall4: boolean, watermarkBase64: string | null) {
+  private buildGradeTotalSheetExcelJS(workbook: ExcelJS.Workbook, data: any[], multiSubject: boolean, singleSmall4: boolean, watermarkBuffer: ArrayBuffer | null, watermarkExtension: 'png' | 'jpeg') {
+    const sheet = workbook.addWorksheet('全年级总分排行', {
+      views: [{ state: 'frozen', ySplit: 1 }]
+    });
+
     data.sort((a, b) => a.yearRank_raw - b.yearRank_raw);
 
-    const aoa = [];
     const header = multiSubject 
       ? ['序号', '班级', '姓名', '原始总分', '', '', '', '序号', '班级', '姓名', '赋分总分']
       : singleSmall4 
         ? ['序号', '班级', '姓名', '原始成绩', '', '', '', '序号', '班级', '姓名', '赋分成绩']
         : ['序号', '班级', '姓名', '原始成绩'];
-    aoa.push(header);
+    
+    sheet.addRow(header);
 
     const rawList = [...data].sort((a, b) => a.yearRank_raw - b.yearRank_raw);
     const assignedList = [...data].sort((a, b) => a.yearRank_assigned - b.yearRank_assigned);
@@ -387,112 +415,123 @@ export class DataProcessorService {
         const a = assignedList[i];
         row.push('', '', '', i + 1, a.class, a.name, a._assignedTotal);
       }
-      aoa.push(row);
-    }
-    
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    
-    // Attempt to attach watermark (Library dependent, but data is ready)
-    if (watermarkBase64) {
-      ws['!backgroundImage'] = watermarkBase64; 
+      sheet.addRow(row);
     }
 
-    // Apply Styling
-    // Header (Keep colors)
-    this.applyTableHeadStyle(ws, 0, 0, header.length - 1, this.COLORS.HEADER_TOTAL);
-    // Body (Remove colors if watermark exists)
-    this.applyTableBodyStyle(ws, aoa.length - 1, header.length, 1, !!watermarkBase64);
+    // Set Column Widths
+    sheet.columns = [
+      { width: 8 }, { width: 14 }, { width: 14 }, { width: 12 }, 
+      { width: 3 }, { width: 3 }, { width: 3 }, 
+      { width: 8 }, { width: 14 }, { width: 14 }, { width: 12 }
+    ];
 
-    ws['!cols'] = [{wch:6}, {wch:12}, {wch:12}, {wch:10}, {wch:2}, {wch:2}, {wch:2}, {wch:6}, {wch:12}, {wch:12}, {wch:10}];
-    return ws;
+    // Styling
+    this.applySheetStylesExcelJS(sheet, header.length, this.COLORS.HEADER_TOTAL, watermarkBuffer);
+
+    // Watermark
+    if (watermarkBuffer) {
+       const imageId = workbook.addImage({
+         buffer: watermarkBuffer,
+         extension: watermarkExtension,
+       });
+       sheet.addBackgroundImage(imageId);
+    }
   }
 
-  private buildSubjectSheet(data: any[], subject: string, isSmall4: boolean, watermarkBase64: string | null) {
-     const aoa = [];
-     const rawKey = subject;
-     const assignedKey = `assigned_${subject}`;
-
-     const header = isSmall4
-        ? ['序号', '班级', '姓名', '原始成绩', '', '', '', '序号', '班级', '姓名', '赋分成绩']
-        : ['序号', '班级', '姓名', '原始成绩'];
-     aoa.push(header);
-
-     const rawList = [...data].sort((a, b) => (b[rawKey]||0) - (a[rawKey]||0) || String(a.id).localeCompare(String(b.id)));
-     const assignedList = isSmall4 ? [...data].sort((a, b) => (b[assignedKey]||0) - (a[assignedKey]||0) || String(a.id).localeCompare(String(b.id))) : [];
-
-     for(let i=0; i<data.length; i++) {
-        const r = rawList[i];
-        const row = [i+1, r.class, r.name, r[rawKey]];
-        if(isSmall4) {
-           const a = assignedList[i];
-           row.push('', '', '', i+1, a.class, a.name, a[assignedKey]);
-        }
-        aoa.push(row);
-     }
-     
-     const ws = XLSX.utils.aoa_to_sheet(aoa);
-
-     if (watermarkBase64) {
-        ws['!backgroundImage'] = watermarkBase64;
-     }
-     
-     // Styling
-     const color = isSmall4 ? this.COLORS.HEADER_SMALL4 : this.COLORS.HEADER_OTHER;
-     this.applyTableHeadStyle(ws, 0, 0, header.length - 1, color);
-     this.applyTableBodyStyle(ws, aoa.length - 1, header.length, 1, !!watermarkBase64);
-
-     ws['!cols'] = [{wch:6}, {wch:12}, {wch:12}, {wch:10}, {wch:2}, {wch:2}, {wch:2}, {wch:6}, {wch:12}, {wch:12}, {wch:10}];
-     return ws;
-  }
-
-  private buildClassSheet(classData: any[], subjects: string[], small4: string[], otherSubjects: string[], watermarkBase64: string | null) {
-    classData.sort((a, b) => a.classRank_raw - b.classRank_raw);
-    const aoa: any[][] = [[], []]; 
-    const merges: any[] = [];
-    
-    // -- Structure Definition --
-    // Store column ranges for styling: { start, end, color }
-    const styleZones: any[] = [];
-    let colIdx = 0;
-
-    // 1. Fixed Columns
-    const fixedHeaders = ['序号', '班级', '姓名'];
-    fixedHeaders.forEach((h, i) => {
-      aoa[0].push(h); aoa[1].push(''); 
-      merges.push({ s: { r: 0, c: i }, e: { r: 1, c: i } });
+  private buildSubjectSheetExcelJS(workbook: ExcelJS.Workbook, data: any[], subject: string, isSmall4: boolean, watermarkBuffer: ArrayBuffer | null, watermarkExtension: 'png' | 'jpeg') {
+    const sheet = workbook.addWorksheet(`${subject}成绩排行`, {
+      views: [{ state: 'frozen', ySplit: 1 }]
     });
-    styleZones.push({ s: 0, e: 2, c: this.COLORS.HEADER_FIXED });
-    colIdx = 3;
 
-    // 2. Total Block
-    aoa[0].push('总分汇总');
-    for(let k=0; k<6; k++) aoa[0].push('');
-    aoa[1].push('原始分', '班排', '年排', '', '赋分', '班排', '年排');
-    merges.push({ s: { r: 0, c: colIdx }, e: { r: 0, c: colIdx + 6 } });
-    styleZones.push({ s: colIdx, e: colIdx + 6, c: this.COLORS.HEADER_TOTAL });
-    colIdx += 7;
+    const rawKey = subject;
+    const assignedKey = `assigned_${subject}`;
 
-    // 3. Small 4
-    for (const s of small4) {
-      aoa[0].push(s);
-      for(let k=0; k<6; k++) aoa[0].push('');
-      aoa[1].push('原始分', '班排', '年排', '', '赋分', '班排', '年排');
-      merges.push({ s: { r: 0, c: colIdx }, e: { r: 0, c: colIdx + 6 } });
-      styleZones.push({ s: colIdx, e: colIdx + 6, c: this.COLORS.HEADER_SMALL4 });
-      colIdx += 7;
+    const header = isSmall4
+       ? ['序号', '班级', '姓名', '原始成绩', '', '', '', '序号', '班级', '姓名', '赋分成绩']
+       : ['序号', '班级', '姓名', '原始成绩'];
+    sheet.addRow(header);
+
+    const rawList = [...data].sort((a, b) => (b[rawKey]||0) - (a[rawKey]||0) || String(a.id).localeCompare(String(b.id)));
+    const assignedList = isSmall4 ? [...data].sort((a, b) => (b[assignedKey]||0) - (a[assignedKey]||0) || String(a.id).localeCompare(String(b.id))) : [];
+
+    for(let i=0; i<data.length; i++) {
+       const r = rawList[i];
+       const row = [i+1, r.class, r.name, r[rawKey]];
+       if(isSmall4) {
+          const a = assignedList[i];
+          row.push('', '', '', i+1, a.class, a.name, a[assignedKey]);
+       }
+       sheet.addRow(row);
     }
 
-    // 4. Others
-    for (const s of otherSubjects) {
-      aoa[0].push(s);
-      for(let k=0; k<2; k++) aoa[0].push('');
-      aoa[1].push('得分', '班排', '年排');
-      merges.push({ s: { r: 0, c: colIdx }, e: { r: 0, c: colIdx + 2 } });
-      styleZones.push({ s: colIdx, e: colIdx + 2, c: this.COLORS.HEADER_OTHER });
-      colIdx += 3;
-    }
+    // Set Column Widths
+    sheet.columns = [
+      { width: 8 }, { width: 14 }, { width: 14 }, { width: 12 }, 
+      { width: 3 }, { width: 3 }, { width: 3 }, 
+      { width: 8 }, { width: 14 }, { width: 14 }, { width: 12 }
+    ];
 
-    // -- Data Rows --
+    const color = isSmall4 ? this.COLORS.HEADER_SMALL4 : this.COLORS.HEADER_OTHER;
+    this.applySheetStylesExcelJS(sheet, header.length, color, watermarkBuffer);
+
+    if (watermarkBuffer) {
+       const imageId = workbook.addImage({
+         buffer: watermarkBuffer,
+         extension: watermarkExtension,
+       });
+       sheet.addBackgroundImage(imageId);
+    }
+  }
+
+  private buildClassSheetExcelJS(workbook: ExcelJS.Workbook, classData: any[], subjects: string[], small4: string[], otherSubjects: string[], className: string, watermarkBuffer: ArrayBuffer | null, watermarkExtension: 'png' | 'jpeg') {
+    const sheet = workbook.addWorksheet(`${className}总分排行`, {
+      views: [{ state: 'frozen', ySplit: 2 }]
+    });
+
+    classData.sort((a, b) => a.classRank_raw - b.classRank_raw);
+
+    // Header 1
+    const row1 = ['序号', '班级', '姓名', '总分汇总', '', '', '', '', '', ''];
+    small4.forEach(s => {
+      row1.push(s, '', '', '', '', '', '');
+    });
+    otherSubjects.forEach(s => {
+      row1.push(s, '', '');
+    });
+    sheet.addRow(row1);
+
+    // Header 2
+    const row2 = ['', '', '', '原始分', '班排', '年排', '', '赋分', '班排', '年排'];
+    small4.forEach(() => {
+      row2.push('原始分', '班排', '年排', '', '赋分', '班排', '年排');
+    });
+    otherSubjects.forEach(() => {
+      row2.push('得分', '班排', '年排');
+    });
+    sheet.addRow(row2);
+
+    // Merges
+    // Fixed cols
+    sheet.mergeCells(1, 1, 2, 1);
+    sheet.mergeCells(1, 2, 2, 2);
+    sheet.mergeCells(1, 3, 2, 3);
+    
+    let col = 4;
+    // Total
+    sheet.mergeCells(1, col, 1, col + 6);
+    col += 7;
+    // Small4
+    small4.forEach(() => {
+      sheet.mergeCells(1, col, 1, col + 6);
+      col += 7;
+    });
+    // Others
+    otherSubjects.forEach(() => {
+      sheet.mergeCells(1, col, 1, col + 2);
+      col += 3;
+    });
+
+    // Data
     for(let i=0; i<classData.length; i++) {
       const r = classData[i];
       const row: any[] = [i+1, r.class, r.name];
@@ -503,34 +542,84 @@ export class DataProcessorService {
       for(const s of otherSubjects) {
         row.push(r[s], r[`classRank_${s}`], r[`yearRank_${s}`]);
       }
-      aoa.push(row);
+      sheet.addRow(row);
     }
 
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws['!merges'] = merges;
-    ws['!cols'] = new Array(colIdx).fill({wch: 10});
+    // Styling
+    // Colors map for headers
+    // Fixed: 1-3
+    // Total: 4-10
+    // ...
     
-    if (watermarkBase64) {
-        ws['!backgroundImage'] = watermarkBase64;
-    }
+    // We can iterate cells to apply styles
+    // Or just apply to all and then override headers
+    
+    // Apply body styles first
+    const rowCount = classData.length;
+    const colCount = col; // last col index + 1 roughly
 
-    // -- Apply Styling --
-    // Body
-    this.applyTableBodyStyle(ws, aoa.length - 2, colIdx, 2, !!watermarkBase64);
+    // Basic styling for all cells
+    sheet.eachRow((row, rowNumber) => {
+      row.eachCell((cell) => {
+         cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+         cell.border = {
+           top: { style: 'thin', color: { argb: this.COLORS.BORDER } },
+           left: { style: 'thin', color: { argb: this.COLORS.BORDER } },
+           bottom: { style: 'thin', color: { argb: this.COLORS.BORDER } },
+           right: { style: 'thin', color: { argb: this.COLORS.BORDER } }
+         };
+         cell.font = { name: 'Microsoft YaHei', size: 10 };
 
-    // Headers (Semantic Coloring) - Keep these always
-    styleZones.forEach(zone => {
-      this.applyTableHeadStyle(ws, 0, zone.s, zone.e, zone.c);
-      this.applyTableHeadStyle(ws, 1, zone.s, zone.e, zone.c);
+         if (rowNumber > 2) {
+             // Body rows
+             if (!watermarkBuffer) {
+                const fillArgb = (rowNumber - 2) % 2 === 0 ? this.COLORS.ROW_EVEN : this.COLORS.ROW_ODD;
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fillArgb } };
+             }
+         } else {
+             // Header rows
+             cell.font = { name: 'Microsoft YaHei', size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
+             // Determine header color based on column index
+             const c = Number(cell.col);
+             let headerColor = this.COLORS.HEADER_FIXED;
+             
+             if (c > 3 && c <= 10) headerColor = this.COLORS.HEADER_TOTAL;
+             else if (c > 10) {
+                // Calculate offset from 11
+                const offset = c - 11;
+                const small4BlockSize = 7;
+                const totalSmall4Cols = small4.length * small4BlockSize;
+                
+                if (offset < totalSmall4Cols) {
+                   headerColor = this.COLORS.HEADER_SMALL4;
+                } else {
+                   headerColor = this.COLORS.HEADER_OTHER;
+                }
+             } else {
+               headerColor = this.COLORS.HEADER_FIXED;
+             }
+             
+             cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: headerColor } };
+         }
+      });
     });
 
-    return ws;
+    if (watermarkBuffer) {
+       const imageId = workbook.addImage({
+         buffer: watermarkBuffer,
+         extension: watermarkExtension,
+       });
+       sheet.addBackgroundImage(imageId);
+    }
   }
 
-  private buildDetailedSummarySheet(data: any[], subjects: string[], small4: string[], watermarkBase64: string | null) {
-    const aoa = [];
+  private buildDetailedSummarySheetExcelJS(workbook: ExcelJS.Workbook, data: any[], subjects: string[], small4: string[], watermarkBuffer: ArrayBuffer | null, watermarkExtension: 'png' | 'jpeg') {
+    const sheet = workbook.addWorksheet('成绩深度分析', {
+      views: [{ state: 'frozen', ySplit: 1 }]
+    });
+
     const headers = ['统计群体', '项目', '参考人数', '平均分', '中位数', '最高分', '最低分', '高分名单 (Top 5)', '低分名单 (Bottom 5)'];
-    aoa.push(headers);
+    sheet.addRow(headers);
 
     const classes = [...new Set(data.map(d => d.class))].sort();
     const groups = ['全年级', ...classes];
@@ -558,7 +647,7 @@ export class DataProcessorService {
       
       // 1. Raw Total
       const rawTotals = rows.map(r => r._rawTotal);
-      aoa.push([
+      sheet.addRow([
         grp, '原始总分', count,
         (rawTotals.reduce((a,b)=>a+b,0)/count).toFixed(1),
         calcMedian(rawTotals).toFixed(1),
@@ -570,7 +659,7 @@ export class DataProcessorService {
       // 2. Assigned Total
       if (small4.length > 0) {
         const assTotals = rows.map(r => r._assignedTotal);
-        aoa.push([
+        sheet.addRow([
           grp, '赋分总分', count,
           (assTotals.reduce((a,b)=>a+b,0)/count).toFixed(1),
           calcMedian(assTotals).toFixed(1),
@@ -583,7 +672,7 @@ export class DataProcessorService {
       // 3. Subjects
       for(const s of subjects) {
         const vals = rows.map(r => Number(r[s]) || 0);
-        aoa.push([
+        sheet.addRow([
           grp, s, count,
           (vals.reduce((a,b)=>a+b,0)/count).toFixed(1),
           calcMedian(vals).toFixed(1),
@@ -594,45 +683,90 @@ export class DataProcessorService {
       }
     }
 
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws['!cols'] = [{wch:15}, {wch:15}, {wch:10}, {wch:10}, {wch:10}, {wch:10}, {wch:10}, {wch:40}, {wch:40}];
-    
-    if (watermarkBase64) {
-        ws['!backgroundImage'] = watermarkBase64;
+    // Column widths
+    sheet.columns = [
+      { width: 15 }, { width: 15 }, { width: 10 }, { width: 10 }, 
+      { width: 10 }, { width: 10 }, { width: 10 }, { width: 40 }, { width: 40 }
+    ];
+
+    // Styling
+    sheet.eachRow((row, rowNumber) => {
+      const isHeader = rowNumber === 1;
+      const rowValues = row.values as any[];
+      const groupName = rowValues[1]; // ExcelJS row values are 1-based index? No, actually array. row.values[1] is col 1.
+      const itemName = rowValues[2];
+
+      row.eachCell((cell) => {
+         cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+         cell.border = {
+           top: { style: 'thin', color: { argb: this.COLORS.BORDER } },
+           left: { style: 'thin', color: { argb: this.COLORS.BORDER } },
+           bottom: { style: 'thin', color: { argb: this.COLORS.BORDER } },
+           right: { style: 'thin', color: { argb: this.COLORS.BORDER } }
+         };
+         cell.font = { name: 'Microsoft YaHei', size: isHeader ? 11 : 10, bold: isHeader };
+
+         if (isHeader) {
+            cell.font.color = { argb: 'FFFFFFFF' };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: this.COLORS.HEADER_SUMMARY } };
+         } else {
+            // Body
+            let fillArgb: string | null = null;
+            if (!watermarkBuffer) {
+               fillArgb = (rowNumber - 1) % 2 === 0 ? this.COLORS.ROW_EVEN : this.COLORS.ROW_ODD;
+               
+               // Highlighting
+               if (groupName === '全年级') fillArgb = this.COLORS.ROW_HIGHLIGHT_GRADE;
+               else if (String(itemName).includes('总分')) fillArgb = this.COLORS.ROW_HIGHLIGHT_TOTAL;
+               
+               if (groupName === '全年级' || String(itemName).includes('总分')) cell.font.bold = true;
+            } else {
+               if (groupName === '全年级' || String(itemName).includes('总分')) cell.font.bold = true;
+            }
+
+            if (fillArgb) {
+               cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fillArgb } };
+            }
+         }
+      });
+    });
+
+    if (watermarkBuffer) {
+       const imageId = workbook.addImage({
+         buffer: watermarkBuffer,
+         extension: watermarkExtension,
+       });
+       sheet.addBackgroundImage(imageId);
     }
+  }
 
-    // Custom Styling for Summary
-    this.applyTableHeadStyle(ws, 0, 0, headers.length - 1, this.COLORS.HEADER_SUMMARY);
-    
-    // Body Logic (Highlighting)
-    for (let r = 1; r < aoa.length; r++) {
-       const rowData = aoa[r];
-       const groupName = rowData[0];
-       const itemName = rowData[1];
-       
-       // If watermark exists, default to transparent (null).
-       // If no watermark, apply alternating colors
-       let fill = watermarkBase64 ? null : (r % 2 === 0 ? this.COLORS.ROW_EVEN : this.COLORS.ROW_ODD);
-       let bold = false;
+  private applySheetStylesExcelJS(sheet: ExcelJS.Worksheet, headerCols: number, headerColor: string, watermarkBuffer: ArrayBuffer | null) {
+     sheet.eachRow((row, rowNumber) => {
+        const isHeader = rowNumber === 1;
+        row.eachCell((cell) => {
+           cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+           cell.border = {
+             top: { style: 'thin', color: { argb: this.COLORS.BORDER } },
+             left: { style: 'thin', color: { argb: this.COLORS.BORDER } },
+             bottom: { style: 'thin', color: { argb: this.COLORS.BORDER } },
+             right: { style: 'thin', color: { argb: this.COLORS.BORDER } }
+           };
+           cell.font = { 
+             name: 'Microsoft YaHei', 
+             size: isHeader ? 11 : 10, 
+             bold: isHeader,
+             color: { argb: isHeader ? 'FFFFFFFF' : 'FF000000' }
+           };
 
-       // Highlight Whole Grade
-       if (groupName === '全年级') {
-         if (!watermarkBase64) fill = this.COLORS.ROW_HIGHLIGHT_GRADE;
-         bold = true;
-       } 
-       // Highlight Totals in class sections
-       else if (String(itemName).includes('总分')) {
-         if (!watermarkBase64) fill = this.COLORS.ROW_HIGHLIGHT_TOTAL;
-         bold = true;
-       }
-
-       for (let c = 0; c < headers.length; c++) {
-          const addr = XLSX.utils.encode_cell({ r, c });
-          if (!ws[addr]) continue;
-          this.setStyle(ws[addr], fill, "000000", bold, false);
-       }
-    }
-
-    return ws;
+           if (isHeader) {
+             cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: headerColor } };
+           } else {
+             if (!watermarkBuffer) {
+               const fillArgb = (rowNumber - 1) % 2 === 0 ? this.COLORS.ROW_EVEN : this.COLORS.ROW_ODD;
+               cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fillArgb } };
+             }
+           }
+        });
+     });
   }
 }

@@ -9,14 +9,16 @@
     "preview": "ng serve --configuration=production"
   },
   "dependencies": {
-    "rxjs": "^7.8.2",
-    "@angular/core": "^21.1.0",
-    "@angular/compiler": "^21.1.0",
-    "@angular/common": "^21.1.0",
-    "@angular/platform-browser": "^21.1.0",
     "@angular/build": "^21.1.0",
     "@angular/cli": "^21.1.0",
+    "@angular/common": "^21.1.0",
+    "@angular/compiler": "^21.1.0",
     "@angular/compiler-cli": "^21.1.0",
+    "@angular/core": "^21.1.0",
+    "@angular/platform-browser": "^21.1.0",
+    "exceljs": "^4.4.0",
+    "marked": "^17.0.1",
+    "rxjs": "^7.8.2",
     "tailwindcss": "latest"
   },
   "devDependencies": {
