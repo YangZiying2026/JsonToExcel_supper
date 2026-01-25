@@ -57,7 +57,7 @@
 
 1. **克隆项目**
    ```bash
-   git clone https://github.com/yourusername/scoremaster.git
+   git clone https://github.com/YangZiyueZY/JsonToExcel_supper.git
    cd scoremaster
    ```
 
