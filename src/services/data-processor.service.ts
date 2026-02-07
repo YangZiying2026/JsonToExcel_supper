@@ -105,6 +105,15 @@ export class DataProcessorService {
       this.setProgress('计算成绩', 50);
       const processedData = await this.processInChunks(mergedData, subjects, small4Subjects);
 
+      // --- New Step: Infer Combinations ---
+      this.log('正在识别选科组合...');
+      const allowedCombinations = ['物化生', '物化地', '物化政', '政史地'];
+      this.inferCombinations(processedData, subjects, allowedCombinations);
+
+      // --- New Step: Calculate Combination Ranks ---
+      this.log('计算组合排名...');
+      this.calcCombinationRanks(processedData, allowedCombinations);
+
       // 7. Process Watermark (If exists)
       let watermarkBuffer: ArrayBuffer | null = null;
       let watermarkExtension: 'png' | 'jpeg' = 'png';
@@ -125,29 +134,51 @@ export class DataProcessorService {
       workbook.created = new Date();
       workbook.modified = new Date();
 
-      // -- Sheet 1: Year Grade Total Rank --
+      // 1. Grade Total Rank
       this.log('生成工作表: 全年级总分排行');
       this.buildGradeTotalSheetExcelJS(workbook, processedData, subjects.length >= 2, subjects.length === 1 && small4Subjects.length > 0, watermarkBuffer, watermarkExtension);
 
-      // -- Sheet 2..N: Subject Ranks --
-      if (subjects.length >= 2) {
-        for (const subj of subjects) {
-          const isSmall4 = small4Subjects.includes(subj);
-          this.buildSubjectSheetExcelJS(workbook, processedData, subj, isSmall4, watermarkBuffer, watermarkExtension);
-        }
+      // 2-5. Combination Ranks (Strict Order)
+      this.log('生成组合排名工作表...');
+      for (const combo of allowedCombinations) {
+          const comboData = processedData.filter(d => d._combinations && d._combinations.includes(combo));
+          if (comboData.length > 0) {
+              this.buildCombinationSheetExcelJS(workbook, comboData, combo, watermarkBuffer, watermarkExtension);
+          }
       }
 
-      // -- Sheet: Class Ranks (Complex Styling) --
-      const classes = [...new Set(processedData.map(d => d.class))].sort();
+      // 6-14. Subject Ranks (Specific Order)
+      const subjectOrder = ['语文', '数学', '英语', '物理', '历史', '化学', '生物', '地理', '政治'];
+      // Filter subjects that exist in data
+      const orderedSubjects = subjectOrder.filter(s => subjects.some(sub => sub.includes(s)));
+      // Add any remaining subjects not in the standard list
+      const remainingSubjects = subjects.filter(s => !orderedSubjects.some(os => s.includes(os)));
+      const finalSubjectOrder = [...orderedSubjects, ...remainingSubjects];
+
+      for (const subj of finalSubjectOrder) {
+          // Find the exact key from data
+          const exactKey = subjects.find(s => s.includes(subj)) || subj;
+          if (subjects.includes(exactKey)) {
+             const isSmall4 = small4Subjects.includes(exactKey);
+             this.buildSubjectSheetExcelJS(workbook, processedData, exactKey, isSmall4, watermarkBuffer, watermarkExtension);
+          }
+      }
+
+      // 15+. Class Ranks (Natural Sort)
+      const classes = [...new Set(processedData.map(d => d.class))].sort((a, b) => {
+          const numA = parseInt(a.replace(/\D/g, '')) || 0;
+          const numB = parseInt(b.replace(/\D/g, '')) || 0;
+          return numA - numB || a.localeCompare(b);
+      });
       this.log(`正在为 ${classes.length} 个班级生成分班表...`);
       for (const cls of classes) {
         const classData = processedData.filter(d => d.class === cls);
-        this.buildClassSheetExcelJS(workbook, classData, subjects, small4Subjects, otherSubjects, cls, watermarkBuffer, watermarkExtension);
+        this.buildClassSheetExcelJS(workbook, classData, subjects, small4Subjects, otherSubjects, cls, allowedCombinations, watermarkBuffer, watermarkExtension);
       }
 
-      // -- Sheet: Summary --
+      // Last. Summary
       this.log('生成多维统计报告...');
-      this.buildDetailedSummarySheetExcelJS(workbook, processedData, subjects, small4Subjects, watermarkBuffer, watermarkExtension);
+      this.buildDetailedSummarySheetExcelJS(workbook, processedData, subjects, small4Subjects, allowedCombinations, watermarkBuffer, watermarkExtension);
 
       // 9. Output
       this.setProgress('正在完成', 95);
@@ -233,11 +264,186 @@ export class DataProcessorService {
         _raw: row,
         id: idVal,
         name: combined[nameKey || ''] || row['姓名'] || idVal,
-        class: combined[classKey || ''] || row['班级'] || '未分类',
+        class: this.normalizeClassName(combined[classKey || ''] || row['班级'] || '未分类'),
         grade: combined[gradeKey || ''] || row['年级'] || '未分类',
         ...row 
       };
     });
+  }
+
+  private normalizeClassName(name: any): string {
+    if (!name) return '未分类';
+    let str = String(name).trim();
+
+    // 1. Remove brackets (keep content)
+    str = str.replace(/[()（）\[\]【】]/g, '');
+
+    // 2. Remove whitespace
+    str = str.replace(/\s+/g, '');
+
+    // 3. Remove "班" or "班级" suffix
+    str = str.replace(/班级?$/, '');
+
+    // 4. Remove Grade prefixes IF followed by other characters
+    const gradePrefixes = [
+        /^(高|初|小)[一二三四五六]/,
+        /^[一二三四五六七八九十]+年级/,
+    ];
+
+    for (const prefix of gradePrefixes) {
+        if (prefix.test(str)) {
+            const replaced = str.replace(prefix, '');
+            if (replaced.length > 0) {
+                str = replaced;
+            }
+        }
+    }
+
+    if (str.length === 0) return '未分类';
+
+    return str + '班';
+  }
+
+  private inferCombinations(data: any[], subjects: string[], allowedCombinations: string[]) {
+      // 1. Check if explicit column exists
+      const firstRow = data[0];
+      const keys = Object.keys(firstRow);
+      const combinationPattern = /(选科|组合|subjects|combination)/i;
+      const explicitKey = keys.find(k => combinationPattern.test(k));
+
+      // Include Physics/History for combination inference
+      const comboKeywords = ['政治', '地理', '化学', '生物', '物理', '历史', 'politics', 'geography', 'chemistry', 'biology', 'physics', 'history'];
+      // Filter subjects that are candidates for combination inference
+      const potentialSubjects = subjects.filter(s => comboKeywords.some(kw => s.toLowerCase().includes(kw)));
+
+      const subjectMap: {[key: string]: string} = {
+          '物理': '物', 'physics': '物',
+          '历史': '史', 'history': '史',
+          '化学': '化', 'chemistry': '化',
+          '生物': '生', 'biology': '生',
+          '政治': '政', 'politics': '政',
+          '地理': '地', 'geography': '地'
+      };
+
+      for (const row of data) {
+          const matchedCombos: string[] = [];
+          
+          // Strategy 1: Explicit Column
+          if (explicitKey && row[explicitKey]) {
+              const explicitVal = this.normalizeCombinationString(String(row[explicitKey]));
+              // Check if normalized val matches any allowed
+              // Fuzzy match: check if characters match
+              for (const allowed of allowedCombinations) {
+                  const allowedSorted = allowed.split('').sort().join('');
+                  if (explicitVal === allowedSorted) {
+                      matchedCombos.push(allowed);
+                  }
+              }
+          }
+          
+          // Strategy 2: Infer from Scores (if no explicit match or to supplement)
+          // If a student has scores > 0 for ALL subjects in a combination, they qualify.
+          if (matchedCombos.length === 0) {
+              for (const allowed of allowedCombinations) {
+                  // e.g. "物化生" -> check "物理", "化学", "生物"
+                  const chars = allowed.split('');
+                  // Find corresponding subject keys in data
+                  const requiredSubjectKeys = chars.map(char => {
+                      // Find key in potentialSubjects that maps to this char
+                      return potentialSubjects.find(s => {
+                          const mappedChar = Object.keys(subjectMap).find(k => s.toLowerCase().includes(k));
+                          return mappedChar ? subjectMap[mappedChar] === char : false;
+                      });
+                  });
+
+                  if (requiredSubjectKeys.every(k => k !== undefined)) {
+                      // Check scores
+                      const hasScores = requiredSubjectKeys.every(k => {
+                          const val = Number(row[k!]);
+                          return !isNaN(val) && val > 0;
+                      });
+                      if (hasScores) {
+                          matchedCombos.push(allowed);
+                      }
+                  }
+              }
+          }
+
+          // If still empty, mark as unknown? Or just empty array.
+          row._combinations = matchedCombos; // Array of strings
+      }
+  }
+
+  private calcCombinationRanks(data: any[], allowedCombinations: string[]) {
+      for (const combo of allowedCombinations) {
+          // Filter students in this combo
+          const comboStudents = data.filter(d => d._combinations && d._combinations.includes(combo));
+          
+          // Sort by Raw Total
+          comboStudents.sort((a, b) => (Number(b._rawTotal) || 0) - (Number(a._rawTotal) || 0));
+          let rank = 1;
+          for (let i = 0; i < comboStudents.length; i++) {
+              if (i > 0 && (Number(comboStudents[i]._rawTotal) || 0) < (Number(comboStudents[i-1]._rawTotal) || 0)) {
+                  rank = i + 1;
+              }
+              comboStudents[i][`gradeRank_combo_${combo}_raw`] = rank;
+          }
+
+          // Sort by Assigned Total
+          comboStudents.sort((a, b) => (Number(b._assignedTotal) || 0) - (Number(a._assignedTotal) || 0));
+          rank = 1;
+          for (let i = 0; i < comboStudents.length; i++) {
+              if (i > 0 && (Number(comboStudents[i]._assignedTotal) || 0) < (Number(comboStudents[i-1]._assignedTotal) || 0)) {
+                  rank = i + 1;
+              }
+              comboStudents[i][`gradeRank_combo_${combo}_assigned`] = rank;
+          }
+      }
+      
+      // Also calculate Class Ranks for each combo
+      const byClass: any = {};
+      data.forEach(r => {
+        if (!byClass[r.class]) byClass[r.class] = [];
+        byClass[r.class].push(r);
+      });
+
+      for (const cls in byClass) {
+          const classStudents = byClass[cls];
+          for (const combo of allowedCombinations) {
+              const comboStudents = classStudents.filter((d: any) => d._combinations && d._combinations.includes(combo));
+               
+              // Raw
+              comboStudents.sort((a: any, b: any) => (Number(b._rawTotal) || 0) - (Number(a._rawTotal) || 0));
+              let rank = 1;
+              for (let i = 0; i < comboStudents.length; i++) {
+                  if (i > 0 && (Number(comboStudents[i]._rawTotal) || 0) < (Number(comboStudents[i-1]._rawTotal) || 0)) {
+                      rank = i + 1;
+                  }
+                  comboStudents[i][`classRank_combo_${combo}_raw`] = rank;
+              }
+
+              // Assigned
+              comboStudents.sort((a: any, b: any) => (Number(b._assignedTotal) || 0) - (Number(a._assignedTotal) || 0));
+              rank = 1;
+              for (let i = 0; i < comboStudents.length; i++) {
+                  if (i > 0 && (Number(comboStudents[i]._assignedTotal) || 0) < (Number(comboStudents[i-1]._assignedTotal) || 0)) {
+                      rank = i + 1;
+                  }
+                  comboStudents[i][`classRank_combo_${combo}_assigned`] = rank;
+              }
+          }
+      }
+  }
+
+  private normalizeCombinationString(str: string): string {
+      if (!str) return '未知组合';
+      // 1. Remove non-chinese/non-alpha chars (keep content)
+      // Actually we just want to sort the characters.
+      // But first remove delimiters like +, space, comma
+      let clean = str.replace(/[+,\s，、]/g, '');
+      
+      // Split into characters, sort, join
+      return clean.split('').sort().join('');
   }
 
   private async processInChunks(data: any[], subjects: string[], small4: string[], skipScoring: boolean = false) {
@@ -438,6 +644,49 @@ export class DataProcessorService {
     }
   }
 
+  private buildCombinationSheetExcelJS(workbook: ExcelJS.Workbook, data: any[], comboName: string, watermarkBuffer: ArrayBuffer | null, watermarkExtension: 'png' | 'jpeg') {
+      const sheet = workbook.addWorksheet(`${comboName}成绩排行`, {
+          views: [{ state: 'frozen', ySplit: 1 }]
+      });
+
+      const header = ['序号', '班级', '姓名', '组合', '原始总分', '组合排名', '', '序号', '班级', '姓名', '组合', '赋分总分', '组合排名'];
+      sheet.addRow(header);
+
+      const rawList = [...data].sort((a, b) => (Number(b._rawTotal) || 0) - (Number(a._rawTotal) || 0));
+      const assignedList = [...data].sort((a, b) => (Number(b._assignedTotal) || 0) - (Number(a._assignedTotal) || 0));
+
+      for (let i = 0; i < data.length; i++) {
+          const r = rawList[i];
+          const rankRaw = r[`gradeRank_combo_${comboName}_raw`] || '-';
+          
+          const a = assignedList[i];
+          const rankAssigned = a[`gradeRank_combo_${comboName}_assigned`] || '-';
+
+          const row = [
+              i + 1, r.class, r.name, comboName, r._rawTotal, rankRaw,
+              '',
+              i + 1, a.class, a.name, comboName, a._assignedTotal, rankAssigned
+          ];
+          sheet.addRow(row);
+      }
+
+      sheet.columns = [
+          { width: 8 }, { width: 14 }, { width: 14 }, { width: 12 }, { width: 10 }, { width: 10 },
+          { width: 3 },
+          { width: 8 }, { width: 14 }, { width: 14 }, { width: 12 }, { width: 10 }, { width: 10 }
+      ];
+
+      this.applySheetStylesExcelJS(sheet, header.length, this.COLORS.HEADER_OTHER, watermarkBuffer);
+
+      if (watermarkBuffer) {
+         const imageId = workbook.addImage({
+           buffer: watermarkBuffer,
+           extension: watermarkExtension,
+         });
+         sheet.addBackgroundImage(imageId);
+      }
+  }
+
   private buildSubjectSheetExcelJS(workbook: ExcelJS.Workbook, data: any[], subject: string, isSmall4: boolean, watermarkBuffer: ArrayBuffer | null, watermarkExtension: 'png' | 'jpeg') {
     const sheet = workbook.addWorksheet(`${subject}成绩排行`, {
       views: [{ state: 'frozen', ySplit: 1 }]
@@ -483,7 +732,7 @@ export class DataProcessorService {
     }
   }
 
-  private buildClassSheetExcelJS(workbook: ExcelJS.Workbook, classData: any[], subjects: string[], small4: string[], otherSubjects: string[], className: string, watermarkBuffer: ArrayBuffer | null, watermarkExtension: 'png' | 'jpeg') {
+  private buildClassSheetExcelJS(workbook: ExcelJS.Workbook, classData: any[], subjects: string[], small4: string[], otherSubjects: string[], className: string, allowedCombinations: string[], watermarkBuffer: ArrayBuffer | null, watermarkExtension: 'png' | 'jpeg') {
     const sheet = workbook.addWorksheet(`${className}总分排行`, {
       views: [{ state: 'frozen', ySplit: 2 }]
     });
@@ -492,6 +741,10 @@ export class DataProcessorService {
 
     // Header 1
     const row1 = ['序号', '班级', '姓名', '总分汇总', '', '', '', '', '', ''];
+    // Add Combinations to Header 1
+    allowedCombinations.forEach(c => {
+        row1.push(`${c}统计`, '', '', '');
+    });
     small4.forEach(s => {
       row1.push(s, '', '', '', '', '', '');
     });
@@ -502,6 +755,11 @@ export class DataProcessorService {
 
     // Header 2
     const row2 = ['', '', '', '原始分', '班排', '年排', '', '赋分', '班排', '年排'];
+    // Add Combinations to Header 2
+    allowedCombinations.forEach(() => {
+        row2.push('赋分', '班排', '年排', '');
+    });
+
     small4.forEach(() => {
       row2.push('原始分', '班排', '年排', '', '赋分', '班排', '年排');
     });
@@ -512,14 +770,21 @@ export class DataProcessorService {
 
     // Merges
     // Fixed cols
-    sheet.mergeCells(1, 1, 2, 1);
-    sheet.mergeCells(1, 2, 2, 2);
-    sheet.mergeCells(1, 3, 2, 3);
+    sheet.mergeCells(1, 1, 2, 1); // 序号
+    sheet.mergeCells(1, 2, 2, 2); // 班级
+    sheet.mergeCells(1, 3, 2, 3); // 姓名
     
     let col = 4;
     // Total
     sheet.mergeCells(1, col, 1, col + 6);
     col += 7;
+    
+    // Combinations
+    allowedCombinations.forEach(() => {
+        sheet.mergeCells(1, col, 1, col + 2); // Merge 3 cells (Score, CR, YR). 4th is spacer.
+        col += 4; // 3 data + 1 spacer
+    });
+
     // Small4
     small4.forEach(() => {
       sheet.mergeCells(1, col, 1, col + 6);
@@ -536,6 +801,22 @@ export class DataProcessorService {
       const r = classData[i];
       const row: any[] = [i+1, r.class, r.name];
       row.push(r._rawTotal, r.classRank_raw, r.yearRank_raw, '', r._assignedTotal, r.classRank_assigned, r.yearRank_assigned);
+      
+      // Combinations Data
+      for(const c of allowedCombinations) {
+          if (r._combinations && r._combinations.includes(c)) {
+             // Show data
+             row.push(
+                 r._assignedTotal, // Use assigned total as score
+                 r[`classRank_combo_${c}_assigned`],
+                 r[`gradeRank_combo_${c}_assigned`],
+                 '' // Spacer
+             );
+          } else {
+             row.push('-', '-', '-', '');
+          }
+      }
+
       for(const s of small4) {
          row.push(r[s], r[`classRank_${s}`], r[`yearRank_${s}`], '', r[`assigned_${s}`], r[`classRank_assigned_${s}`], r[`yearRank_assigned_${s}`]);
       }
@@ -549,10 +830,7 @@ export class DataProcessorService {
     // Colors map for headers
     // Fixed: 1-3
     // Total: 4-10
-    // ...
-    
-    // We can iterate cells to apply styles
-    // Or just apply to all and then override headers
+    // Combinations: 11 ...
     
     // Apply body styles first
     const rowCount = classData.length;
@@ -585,15 +863,24 @@ export class DataProcessorService {
              
              if (c > 3 && c <= 10) headerColor = this.COLORS.HEADER_TOTAL;
              else if (c > 10) {
-                // Calculate offset from 11
                 const offset = c - 11;
-                const small4BlockSize = 7;
-                const totalSmall4Cols = small4.length * small4BlockSize;
+                const comboBlockSize = 4;
+                const totalComboCols = allowedCombinations.length * comboBlockSize;
                 
-                if (offset < totalSmall4Cols) {
-                   headerColor = this.COLORS.HEADER_SMALL4;
+                if (offset < totalComboCols) {
+                    // Combinations Color (New) - Use a distinct color?
+                    // Let's use a variation of Blue or Teal
+                    headerColor = "FF059669"; // Emerald 600
                 } else {
-                   headerColor = this.COLORS.HEADER_OTHER;
+                    const offset2 = offset - totalComboCols;
+                    const small4BlockSize = 7;
+                    const totalSmall4Cols = small4.length * small4BlockSize;
+                    
+                    if (offset2 < totalSmall4Cols) {
+                       headerColor = this.COLORS.HEADER_SMALL4;
+                    } else {
+                       headerColor = this.COLORS.HEADER_OTHER;
+                    }
                 }
              } else {
                headerColor = this.COLORS.HEADER_FIXED;
@@ -613,7 +900,7 @@ export class DataProcessorService {
     }
   }
 
-  private buildDetailedSummarySheetExcelJS(workbook: ExcelJS.Workbook, data: any[], subjects: string[], small4: string[], watermarkBuffer: ArrayBuffer | null, watermarkExtension: 'png' | 'jpeg') {
+  private buildDetailedSummarySheetExcelJS(workbook: ExcelJS.Workbook, data: any[], subjects: string[], small4: string[], allowedCombinations: string[], watermarkBuffer: ArrayBuffer | null, watermarkExtension: 'png' | 'jpeg') {
     const sheet = workbook.addWorksheet('成绩深度分析', {
       views: [{ state: 'frozen', ySplit: 1 }]
     });
@@ -621,7 +908,11 @@ export class DataProcessorService {
     const headers = ['统计群体', '项目', '参考人数', '平均分', '中位数', '最高分', '最低分', '高分名单 (Top 5)', '低分名单 (Bottom 5)'];
     sheet.addRow(headers);
 
-    const classes = [...new Set(data.map(d => d.class))].sort();
+    const classes = [...new Set(data.map(d => d.class))].sort((a, b) => {
+        const numA = parseInt(a.replace(/\D/g, '')) || 0;
+        const numB = parseInt(b.replace(/\D/g, '')) || 0;
+        return numA - numB || a.localeCompare(b);
+    });
     const groups = ['全年级', ...classes];
 
     const calcMedian = (values: number[]) => {
@@ -680,6 +971,25 @@ export class DataProcessorService {
           getHolders(rows, s, Math.max(...vals)),
           getHolders(rows, s, Math.min(...vals), true)
         ]);
+      }
+
+      // 4. Combinations (Separate stats for allowed combos)
+      for (const combo of allowedCombinations) {
+        // Filter students in this group who have this combination
+        const subRows = rows.filter(r => r._combinations && r._combinations.includes(combo));
+        const subCount = subRows.length;
+        if (subCount > 0) {
+            const vals = subRows.map(r => r._assignedTotal);
+            
+            sheet.addRow([
+              grp, `组合: ${combo}`, subCount,
+              (vals.reduce((a,b)=>a+b,0)/subCount).toFixed(1),
+              calcMedian(vals).toFixed(1),
+              Math.max(...vals), Math.min(...vals),
+              getHolders(subRows, '_assignedTotal', Math.max(...vals)),
+              getHolders(subRows, '_assignedTotal', Math.min(...vals), true)
+            ]);
+        }
       }
     }
 
