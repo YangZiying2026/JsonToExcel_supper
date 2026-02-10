@@ -1,6 +1,6 @@
 
 import { Injectable, signal } from '@angular/core';
-import ExcelJS from 'exceljs';
+import type ExcelJS from 'exceljs';
 
 declare const XLSX: any;
 
@@ -50,6 +50,21 @@ export class DataProcessorService {
     this._state.update(s => ({ ...s, stage, progress }));
   }
 
+  // Helper to load XLSX library dynamically
+  private loadXLSXLibrary(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (typeof XLSX !== 'undefined') {
+        resolve();
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.min.js';
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error('Failed to load XLSX library'));
+      document.head.appendChild(script);
+    });
+  }
+
   // Helper to read file as Base64 string
   private readFileAsBase64(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -62,15 +77,32 @@ export class DataProcessorService {
     });
   }
 
-  async process(jsonFile: File, excelFile: File | null, watermarkFile: File | null) {
+  async process(jsonFile: File, excelFile: File | null, watermarkFile: File | null, isSubjectStatsMode: boolean = false) {
     try {
-      this.setProgress('正在初始化', 0);
+      // Lazy load ExcelJS
+      this.setProgress('正在初始化资源', 0);
+      this.log('正在加载核心引擎...');
+      const ExcelJS = (await import('exceljs')).default;
+      
+      // Lazy load XLSX if needed
+      if (excelFile) {
+        this.log('正在加载 Excel 解析库...');
+        await this.loadXLSXLibrary();
+      }
+
+      this.setProgress('正在初始化', 5);
       this.log('启动处理引擎...');
 
       // 1. Read JSON
       this.setProgress('读取数据中', 10);
       const jsonText = await jsonFile.text();
-      let rawData: any[] = JSON.parse(jsonText);
+      let rawData: any[];
+      try {
+        rawData = JSON.parse(jsonText);
+      } catch (e) {
+        throw new Error('JSON 文件格式错误，请检查是否为有效的 JSON 格式。');
+      }
+      
       if (!Array.isArray(rawData) || rawData.length === 0) {
         throw new Error('无效的 JSON 文件：必须是非空数组。');
       }
@@ -134,51 +166,103 @@ export class DataProcessorService {
       workbook.created = new Date();
       workbook.modified = new Date();
 
-      // 1. Grade Total Rank
-      this.log('生成工作表: 全年级总分排行');
-      this.buildGradeTotalSheetExcelJS(workbook, processedData, subjects.length >= 2, subjects.length === 1 && small4Subjects.length > 0, watermarkBuffer, watermarkExtension);
+      if (isSubjectStatsMode) {
+          // --- Subject Statistics Mode ---
+          this.log('正在生成分科统计模式报表...');
+          
+          // 1. Grade Total Rank
+          this.log('生成工作表: 年级总分排名');
+          this.buildGradeTotalSheetSubjectMode(workbook, processedData, subjects, allowedCombinations, watermarkBuffer, watermarkExtension);
 
-      // 2-5. Combination Ranks (Strict Order)
-      this.log('生成组合排名工作表...');
-      for (const combo of allowedCombinations) {
-          const comboData = processedData.filter(d => d._combinations && d._combinations.includes(combo));
-          if (comboData.length > 0) {
-              this.buildCombinationSheetExcelJS(workbook, comboData, combo, watermarkBuffer, watermarkExtension);
+          // 2. Combo Ranks
+          this.log('生成工作表: 各组合总分排名');
+          for (const combo of allowedCombinations) {
+              const comboData = processedData.filter(d => d._combinations && d._combinations.includes(combo));
+              if (comboData.length > 0) {
+                  this.buildCombinationSheetSubjectMode(workbook, comboData, combo, subjects, watermarkBuffer, watermarkExtension);
+              }
           }
-      }
 
-      // 6-14. Subject Ranks (Specific Order)
-      const subjectOrder = ['语文', '数学', '英语', '物理', '历史', '化学', '生物', '地理', '政治'];
-      // Filter subjects that exist in data
-      const orderedSubjects = subjectOrder.filter(s => subjects.some(sub => sub.includes(s)));
-      // Add any remaining subjects not in the standard list
-      const remainingSubjects = subjects.filter(s => !orderedSubjects.some(os => s.includes(os)));
-      const finalSubjectOrder = [...orderedSubjects, ...remainingSubjects];
+          // 3. Subject Ranks
+          this.log('生成工作表: 各学科排名');
+          const subjectOrder = ['语文', '数学', '英语', '物理', '历史', '化学', '政治', '生物', '地理'];
+          // Filter subjects that exist in data
+          const orderedSubjects = subjectOrder.filter(s => subjects.some(sub => sub.includes(s)));
+          // Add any remaining subjects not in the standard list
+          const remainingSubjects = subjects.filter(s => !orderedSubjects.some(os => s.includes(os)));
+          const finalSubjectOrder = [...orderedSubjects, ...remainingSubjects];
 
-      for (const subj of finalSubjectOrder) {
-          // Find the exact key from data
-          const exactKey = subjects.find(s => s.includes(subj)) || subj;
-          if (subjects.includes(exactKey)) {
-             const isSmall4 = small4Subjects.includes(exactKey);
-             this.buildSubjectSheetExcelJS(workbook, processedData, exactKey, isSmall4, watermarkBuffer, watermarkExtension);
+          for (const subj of finalSubjectOrder) {
+              const exactKey = subjects.find(s => s.includes(subj)) || subj;
+              if (subjects.includes(exactKey)) {
+                   this.buildSubjectSheetSubjectMode(workbook, processedData, exactKey, watermarkBuffer, watermarkExtension);
+              }
           }
-      }
 
-      // 15+. Class Ranks (Natural Sort)
-      const classes = [...new Set(processedData.map(d => d.class))].sort((a, b) => {
-          const numA = parseInt(a.replace(/\D/g, '')) || 0;
-          const numB = parseInt(b.replace(/\D/g, '')) || 0;
-          return numA - numB || a.localeCompare(b);
-      });
-      this.log(`正在为 ${classes.length} 个班级生成分班表...`);
-      for (const cls of classes) {
-        const classData = processedData.filter(d => d.class === cls);
-        this.buildClassSheetExcelJS(workbook, classData, subjects, small4Subjects, otherSubjects, cls, allowedCombinations, watermarkBuffer, watermarkExtension);
-      }
+          // 4. Class Sheets
+          const classes = [...new Set(processedData.map(d => d.class))].sort((a, b) => {
+              const numA = parseInt(a.replace(/\D/g, '')) || 0;
+              const numB = parseInt(b.replace(/\D/g, '')) || 0;
+              return numA - numB || a.localeCompare(b);
+          });
+          this.log(`正在为 ${classes.length} 个班级生成分班表...`);
+          for (const cls of classes) {
+            const classData = processedData.filter(d => d.class === cls);
+            this.buildClassSheetSubjectMode(workbook, classData, subjects, small4Subjects, otherSubjects, cls, allowedCombinations, watermarkBuffer, watermarkExtension);
+          }
+          
+          // 5. Summary (Keep existing summary or create new? Using existing for now as it covers general stats)
+          this.log('生成多维统计报告...');
+          this.buildDetailedSummarySheetExcelJS(workbook, processedData, subjects, small4Subjects, allowedCombinations, watermarkBuffer, watermarkExtension);
 
-      // Last. Summary
-      this.log('生成多维统计报告...');
-      this.buildDetailedSummarySheetExcelJS(workbook, processedData, subjects, small4Subjects, allowedCombinations, watermarkBuffer, watermarkExtension);
+      } else {
+          // --- Original Score Analysis Mode ---
+          // 1. Grade Total Rank
+          this.log('生成工作表: 全年级总分排行');
+          this.buildGradeTotalSheetExcelJS(workbook, processedData, subjects.length >= 2, subjects.length === 1 && small4Subjects.length > 0, watermarkBuffer, watermarkExtension);
+
+          // 2-5. Combination Ranks (Strict Order)
+          this.log('生成组合排名工作表...');
+          for (const combo of allowedCombinations) {
+              const comboData = processedData.filter(d => d._combinations && d._combinations.includes(combo));
+              if (comboData.length > 0) {
+                  this.buildCombinationSheetExcelJS(workbook, comboData, combo, watermarkBuffer, watermarkExtension);
+              }
+          }
+
+          // 6-14. Subject Ranks (Specific Order)
+          const subjectOrder = ['语文', '数学', '英语', '物理', '历史', '化学', '生物', '地理', '政治'];
+          // Filter subjects that exist in data
+          const orderedSubjects = subjectOrder.filter(s => subjects.some(sub => sub.includes(s)));
+          // Add any remaining subjects not in the standard list
+          const remainingSubjects = subjects.filter(s => !orderedSubjects.some(os => s.includes(os)));
+          const finalSubjectOrder = [...orderedSubjects, ...remainingSubjects];
+
+          for (const subj of finalSubjectOrder) {
+              // Find the exact key from data
+              const exactKey = subjects.find(s => s.includes(subj)) || subj;
+              if (subjects.includes(exactKey)) {
+                 const isSmall4 = small4Subjects.includes(exactKey);
+                 this.buildSubjectSheetExcelJS(workbook, processedData, exactKey, isSmall4, watermarkBuffer, watermarkExtension);
+              }
+          }
+
+          // 15+. Class Ranks (Natural Sort)
+          const classes = [...new Set(processedData.map(d => d.class))].sort((a, b) => {
+              const numA = parseInt(a.replace(/\D/g, '')) || 0;
+              const numB = parseInt(b.replace(/\D/g, '')) || 0;
+              return numA - numB || a.localeCompare(b);
+          });
+          this.log(`正在为 ${classes.length} 个班级生成分班表...`);
+          for (const cls of classes) {
+            const classData = processedData.filter(d => d.class === cls);
+            this.buildClassSheetExcelJS(workbook, classData, subjects, small4Subjects, otherSubjects, cls, allowedCombinations, watermarkBuffer, watermarkExtension);
+          }
+
+          // Last. Summary
+          this.log('生成多维统计报告...');
+          this.buildDetailedSummarySheetExcelJS(workbook, processedData, subjects, small4Subjects, allowedCombinations, watermarkBuffer, watermarkExtension);
+      }
 
       // 9. Output
       this.setProgress('正在完成', 95);
@@ -249,6 +333,7 @@ export class DataProcessorService {
     const namePattern = /(姓名|name|xm)/i;
     const classPattern = /(班级|class|bj|bjmc)/i;
     const gradePattern = /(年级|grade|nj)/i;
+    const combinationPattern = /(组合|选科|combination|subject_group)/i;
 
     return raw.map(row => {
       const idVal = String(row[rawId]);
@@ -259,6 +344,7 @@ export class DataProcessorService {
       const nameKey = keys.find(k => namePattern.test(k));
       const classKey = keys.find(k => classPattern.test(k));
       const gradeKey = keys.find(k => gradePattern.test(k));
+      const combinationKey = keys.find(k => combinationPattern.test(k));
 
       return {
         _raw: row,
@@ -266,6 +352,7 @@ export class DataProcessorService {
         name: combined[nameKey || ''] || row['姓名'] || idVal,
         class: this.normalizeClassName(combined[classKey || ''] || row['班级'] || '未分类'),
         grade: combined[gradeKey || ''] || row['年级'] || '未分类',
+        _kbCombination: combined[combinationKey || ''],
         ...row 
       };
     });
@@ -328,8 +415,19 @@ export class DataProcessorService {
       for (const row of data) {
           const matchedCombos: string[] = [];
           
+          // Strategy 0: KB Combination (Highest Priority)
+          if (row._kbCombination) {
+              const explicitVal = this.normalizeCombinationString(String(row._kbCombination));
+              for (const allowed of allowedCombinations) {
+                  const allowedSorted = allowed.split('').sort().join('');
+                  if (explicitVal === allowedSorted) {
+                      matchedCombos.push(allowed);
+                  }
+              }
+          }
+
           // Strategy 1: Explicit Column
-          if (explicitKey && row[explicitKey]) {
+          if (matchedCombos.length === 0 && explicitKey && row[explicitKey]) {
               const explicitVal = this.normalizeCombinationString(String(row[explicitKey]));
               // Check if normalized val matches any allowed
               // Fuzzy match: check if characters match
@@ -1078,5 +1176,211 @@ export class DataProcessorService {
            }
         });
      });
+  }
+
+  // --- Subject Statistics Mode Builders ---
+
+  private buildGradeTotalSheetSubjectMode(workbook: ExcelJS.Workbook, data: any[], subjects: string[], allowedCombinations: string[], watermarkBuffer: ArrayBuffer | null, watermarkExtension: 'png' | 'jpeg') {
+    const sheet = workbook.addWorksheet('年级总分排名', {
+      views: [{ state: 'frozen', ySplit: 1 }]
+    });
+
+    data.sort((a, b) => a.yearRank_assigned - b.yearRank_assigned);
+
+    const header = ['序号', '班级', '姓名', '组合', '原始总分', '原始排名', '赋分总分', '赋分排名'];
+    sheet.addRow(header);
+
+    for (let i = 0; i < data.length; i++) {
+      const r = data[i];
+      const combo = (r._combinations && r._combinations.length > 0) ? r._combinations[0] : '无';
+      const row = [
+          i + 1, 
+          r.class, 
+          r.name, 
+          combo,
+          r._rawTotal, 
+          r.yearRank_raw, 
+          r._assignedTotal, 
+          r.yearRank_assigned
+      ];
+      sheet.addRow(row);
+    }
+
+    sheet.columns = [
+      { width: 8 }, { width: 14 }, { width: 14 }, { width: 12 }, 
+      { width: 12 }, { width: 10 }, { width: 12 }, { width: 10 }
+    ];
+
+    this.applySheetStylesExcelJS(sheet, header.length, this.COLORS.HEADER_TOTAL, watermarkBuffer);
+    if (watermarkBuffer) {
+       const imageId = workbook.addImage({ buffer: watermarkBuffer, extension: watermarkExtension });
+       sheet.addBackgroundImage(imageId);
+    }
+  }
+
+  private buildCombinationSheetSubjectMode(workbook: ExcelJS.Workbook, data: any[], comboName: string, subjects: string[], watermarkBuffer: ArrayBuffer | null, watermarkExtension: 'png' | 'jpeg') {
+      const sheet = workbook.addWorksheet(`${comboName}总分排名`, {
+          views: [{ state: 'frozen', ySplit: 1 }]
+      });
+
+      // Sort by Assigned Total for the combo
+      data.sort((a, b) => (Number(b._assignedTotal) || 0) - (Number(a._assignedTotal) || 0));
+
+      const header = ['序号', '班级', '姓名', '组合', '原始总分', '组合排名', '赋分总分', '组合排名'];
+      sheet.addRow(header);
+
+      for (let i = 0; i < data.length; i++) {
+          const r = data[i];
+          // Recalculate rank in this list strictly or use pre-calculated? 
+          // Use pre-calculated if available, but since we are listing all in this combo, i+1 is effectively the rank if sorted.
+          // However, tie-breaking might differ. Let's use pre-calculated.
+          const rankRaw = r[`gradeRank_combo_${comboName}_raw`] || '-';
+          const rankAssigned = r[`gradeRank_combo_${comboName}_assigned`] || '-';
+
+          const row = [
+              i + 1, 
+              r.class, 
+              r.name, 
+              comboName, 
+              r._rawTotal, 
+              rankRaw,
+              r._assignedTotal, 
+              rankAssigned
+          ];
+          sheet.addRow(row);
+      }
+
+      sheet.columns = [
+          { width: 8 }, { width: 14 }, { width: 14 }, { width: 12 }, 
+          { width: 12 }, { width: 10 }, { width: 12 }, { width: 10 }
+      ];
+
+      this.applySheetStylesExcelJS(sheet, header.length, this.COLORS.HEADER_OTHER, watermarkBuffer);
+      if (watermarkBuffer) {
+         const imageId = workbook.addImage({ buffer: watermarkBuffer, extension: watermarkExtension });
+         sheet.addBackgroundImage(imageId);
+      }
+  }
+
+  private buildSubjectSheetSubjectMode(workbook: ExcelJS.Workbook, data: any[], subject: string, watermarkBuffer: ArrayBuffer | null, watermarkExtension: 'png' | 'jpeg') {
+    const sheet = workbook.addWorksheet(`${subject}排名`, {
+      views: [{ state: 'frozen', ySplit: 1 }]
+    });
+
+    // Filter students who have this subject (score > 0 or part of their combo?)
+    // Requirement says: "为参考该学科的考生不统计".
+    // We can filter by checking if they have a valid score or if it's in their combo.
+    // Ideally check if score exists.
+    const validData = data.filter(d => {
+        const val = Number(d[subject]);
+        return !isNaN(val) && val > 0;
+    });
+
+    validData.sort((a, b) => (Number(b[subject]) || 0) - (Number(a[subject]) || 0));
+
+    // Determine if it is a small 4 subject (has assigned score)
+    const isSmall4 = validData.some(d => d[`assigned_${subject}`] !== undefined && d[`assigned_${subject}`] !== Number(d[subject]));
+    
+    const header = isSmall4
+       ? ['序号', '班级', '姓名', '组合', '原始分', '排名', '赋分', '排名']
+       : ['序号', '班级', '姓名', '组合', '原始分', '排名'];
+    
+    sheet.addRow(header);
+
+    for(let i=0; i<validData.length; i++) {
+       const r = validData[i];
+       const combo = (r._combinations && r._combinations.length > 0) ? r._combinations[0] : '无';
+       const rankRaw = r[`yearRank_${subject}`] || i+1;
+       
+       const row = [i+1, r.class, r.name, combo, r[subject], rankRaw];
+       
+       if(isSmall4) {
+          const rankAssigned = r[`yearRank_assigned_${subject}`] || '-';
+          row.push(r[`assigned_${subject}`], rankAssigned);
+       }
+       sheet.addRow(row);
+    }
+
+    sheet.columns = [
+      { width: 8 }, { width: 14 }, { width: 14 }, { width: 12 }, 
+      { width: 10 }, { width: 8 }, { width: 10 }, { width: 8 }
+    ];
+
+    const color = isSmall4 ? this.COLORS.HEADER_SMALL4 : this.COLORS.HEADER_OTHER;
+    this.applySheetStylesExcelJS(sheet, header.length, color, watermarkBuffer);
+    if (watermarkBuffer) {
+       const imageId = workbook.addImage({ buffer: watermarkBuffer, extension: watermarkExtension });
+       sheet.addBackgroundImage(imageId);
+    }
+  }
+
+  private buildClassSheetSubjectMode(workbook: ExcelJS.Workbook, classData: any[], subjects: string[], small4: string[], otherSubjects: string[], className: string, allowedCombinations: string[], watermarkBuffer: ArrayBuffer | null, watermarkExtension: 'png' | 'jpeg') {
+    const sheet = workbook.addWorksheet(`${className}`, {
+      views: [{ state: 'frozen', ySplit: 1 }]
+    });
+
+    classData.sort((a, b) => (Number(b._assignedTotal) || 0) - (Number(a._assignedTotal) || 0));
+
+    // Columns: 序号, 姓名, 组合, 原始总分, 赋分总分, 语文, 数学, 英语, 物理, 历史, (后面是要赋分的学科)
+    // Requirement: "序号，姓名，组合，原始总分，赋分总分，语文，数学，英语，物理，历史，（后面是要赋分的学科）"
+    
+    const fixedHeaders = ['序号', '姓名', '组合', '原始总分', '赋分总分'];
+    
+    // Determine subject order
+    // "语文，数学，英语，物理，历史，（后面是要赋分的学科）"
+    const prioritySubjects = ['语文', '数学', '英语', '物理', '历史'];
+    const availablePriority = prioritySubjects.filter(s => subjects.some(sub => sub.includes(s)));
+    
+    // Remaining are likely small4 or others not in priority
+    const remaining = subjects.filter(s => !prioritySubjects.some(p => s.includes(p)));
+    // Sort remaining: maybe Small4 first?
+    const finalSubjects = [...availablePriority, ...remaining];
+
+    const header = [...fixedHeaders, ...finalSubjects];
+    sheet.addRow(header);
+
+    for(let i=0; i<classData.length; i++) {
+      const r = classData[i];
+      const combo = (r._combinations && r._combinations.length > 0) ? r._combinations[0] : '-';
+      
+      const row = [
+          i + 1,
+          r.name,
+          combo,
+          r._rawTotal,
+          r._assignedTotal
+      ];
+
+      finalSubjects.forEach(s => {
+          // For small4, do we show Assigned or Raw?
+          // Requirement says "（后面是要赋分的学科）". 
+          // Usually in this context (Class Sheet summary), we show the score that contributes to total.
+          // If it's a small4 subject, the Assigned score contributes to Assigned Total.
+          // But wait, user requirement says: "语文，数学，英语，物理，历史，（后面是要赋分的学科）". 
+          // Ambiguous if it means "show assigned score for these" or "list these subjects".
+          // Given "赋分总分" is present, showing Assigned Score for small4 makes sense.
+          // However, checking previous logic, we have assigned_SUBJECT.
+          
+          if (small4.includes(s)) {
+              row.push(r[`assigned_${s}`] || r[s] || '-');
+          } else {
+              row.push(r[s] || '-');
+          }
+      });
+
+      sheet.addRow(row);
+    }
+
+    // Styling
+    sheet.columns = header.map(() => ({ width: 12 }));
+    sheet.getColumn(1).width = 6; // No
+    sheet.getColumn(2).width = 14; // Name
+    sheet.getColumn(3).width = 12; // Combo
+
+    this.applySheetStylesExcelJS(sheet, header.length, this.COLORS.HEADER_FIXED, watermarkBuffer);
+    if (watermarkBuffer) {
+       const imageId = workbook.addImage({ buffer: watermarkBuffer, extension: watermarkExtension });
+       sheet.addBackgroundImage(imageId);
+    }
   }
 }

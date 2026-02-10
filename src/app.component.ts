@@ -3,7 +3,6 @@ import { Component, signal, inject, ViewChild, ElementRef } from '@angular/core'
 import { CommonModule } from '@angular/common';
 import { DataProcessorService } from './services/data-processor.service';
 import { SafeUrl, SafeHtml, DomSanitizer } from '@angular/platform-browser';
-import { marked } from 'marked';
 
 @Component({
   selector: 'app-root',
@@ -25,6 +24,12 @@ export class AppComponent {
   watermarkFile = signal<File | null>(null);
   outputFilename = signal<string>('');
   downloadUrl = signal<SafeUrl | null>(null);
+  
+  // 分科统计模式开关
+  isSubjectStatsMode = signal<boolean>(false);
+  
+  // 高级设置折叠状态
+  isAdvancedSettingsOpen = signal<boolean>(false);
 
   // Markdown State
   mdFiles = signal<{title: string, filename: string}[]>([]);
@@ -67,6 +72,7 @@ export class AppComponent {
       const res = await fetch(`/markdown/${file.filename}`);
       if (res.ok) {
         const text = await res.text();
+        const { marked } = await import('marked');
         const html = await marked.parse(text);
         this.currentMdContent.set(this.sanitizer.bypassSecurityTrustHtml(html as string));
       } else {
@@ -90,22 +96,52 @@ export class AppComponent {
   onJsonSelect(event: Event) {
     const input = event.target as HTMLInputElement;
     if (input.files && input.files.length > 0) {
-      this.jsonFile.set(input.files[0]);
+      const file = input.files[0];
+      // 20MB limit
+      if (file.size > 20 * 1024 * 1024) {
+        alert('文件过大，请上传小于 20MB 的 JSON 文件。');
+        input.value = '';
+        return;
+      }
+      this.jsonFile.set(file);
     }
   }
 
   onExcelSelect(event: Event) {
     const input = event.target as HTMLInputElement;
     if (input.files && input.files.length > 0) {
-      this.excelFile.set(input.files[0]);
+      const file = input.files[0];
+      // 20MB limit
+      if (file.size > 20 * 1024 * 1024) {
+        alert('文件过大，请上传小于 20MB 的 Excel 文件。');
+        input.value = '';
+        return;
+      }
+      this.excelFile.set(file);
     }
   }
 
   onWatermarkSelect(event: Event) {
     const input = event.target as HTMLInputElement;
     if (input.files && input.files.length > 0) {
-      this.watermarkFile.set(input.files[0]);
+      const file = input.files[0];
+      // 10MB limit for images
+      if (file.size > 10 * 1024 * 1024) {
+        alert('图片过大，请上传小于 10MB 的图片文件。');
+        input.value = '';
+        return;
+      }
+      this.watermarkFile.set(file);
     }
+  }
+
+  // 切换分科统计模式
+  toggleSubjectStatsMode() {
+    this.isSubjectStatsMode.set(!this.isSubjectStatsMode());
+  }
+
+  toggleAdvancedSettings() {
+    this.isAdvancedSettingsOpen.set(!this.isAdvancedSettingsOpen());
   }
 
   onFilenameInput(event: Event) {
@@ -125,7 +161,8 @@ export class AppComponent {
       const url = await this.dataService.process(
         this.jsonFile()!, 
         this.excelFile(), 
-        this.watermarkFile()
+        this.watermarkFile(),
+        this.isSubjectStatsMode()
       );
       this.downloadUrl.set(this.sanitizer.bypassSecurityTrustUrl(url));
     } catch (e) {
